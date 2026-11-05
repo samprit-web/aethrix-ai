@@ -31,11 +31,12 @@ export default function Home() {
             </div>
             <div className="hidden md:flex items-center space-x-8">
               <a href="#features" className="text-gray-300 hover:text-cyan-400 transition-colors">Features</a>
+              <Link href="/tools" className="text-gray-300 hover:text-cyan-400 transition-colors">Tools</Link>
+              <Link href="/chat" className="text-gray-300 hover:text-cyan-400 transition-colors">Chat</Link>
               <a href="#about" className="text-gray-300 hover:text-cyan-400 transition-colors">About</a>
-              <a href="#pricing" className="text-gray-300 hover:text-cyan-400 transition-colors">Pricing</a>
               <Link href="/auth/login" className="text-gray-300 hover:text-cyan-400 transition-colors">Login</Link>
-              <Link href="/auth/register" className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-lg hover:shadow-lg hover:shadow-cyan-500/50 transition-all">
-                Get Started Free
+              <Link href="/chat" className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-lg hover:shadow-lg hover:shadow-cyan-500/50 transition-all">
+                Open Intelligent Chat
               </Link>
             </div>
           </div>
@@ -65,10 +66,10 @@ export default function Home() {
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
               <Link href="/chat" className="px-8 py-4 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-lg text-lg font-semibold hover:shadow-lg hover:shadow-cyan-500/50 transition-all float-animation">
-                Start Using AETHRIX Free
+                Start Intelligent Chat
               </Link>
-              <Link href="#features" className="px-8 py-4 border border-cyan-500/50 rounded-lg text-lg font-semibold hover:bg-cyan-500/10 transition-all">
-                Explore Features
+              <Link href="/tools" className="px-8 py-4 border border-cyan-500/50 rounded-lg text-lg font-semibold hover:bg-cyan-500/10 transition-all">
+                Explore Tools
               </Link>
             </div>
           </motion.div>
