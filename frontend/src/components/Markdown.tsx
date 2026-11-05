@@ -14,21 +14,25 @@ export function Markdown({ content }: { content: string }) {
   let key = 0;
   while ((m = codeBlock.exec(content)) !== null) {
     if (m.index > last) parts.push(<Inline key={key++} text={content.slice(last, m.index)} />);
-    const lang = m[1] || '';
+    const lang = m[1] || 'text';
     const code = m[2] || '';
     parts.push(
-      <div key={key++} className="my-3 overflow-hidden rounded-lg border border-cyan-500/20 bg-[#050814]">
-        <div className="flex items-center justify-between border-b border-cyan-500/10 px-3 py-1.5 text-xs text-gray-400">
-          <span>{lang || 'code'}</span>
-          <button className="hover:text-cyan-300" onClick={() => navigator.clipboard?.writeText(code)}>Copy</button>
+      <div key={key++} className="my-4 overflow-hidden rounded-xl border border-white/10 bg-[#0d0d0d]">
+        <div className="flex items-center justify-between bg-white/[0.04] px-4 py-2 text-xs text-[#b4b4b4]">
+          <span className="font-medium lowercase">{lang}</span>
+          <button
+            type="button"
+            className="rounded px-2 py-1 hover:bg-white/10 hover:text-white transition"
+            onClick={() => navigator.clipboard?.writeText(code)}
+          >Copy code</button>
         </div>
-        <pre className="overflow-x-auto p-3 text-sm leading-6 text-gray-100"><code>{code}</code></pre>
+        <pre className="overflow-x-auto p-4 text-[13px] leading-6 text-[#ececec]"><code>{code}</code></pre>
       </div>
     );
     last = m.index + m[0].length;
   }
   if (last < content.length) parts.push(<Inline key={key++} text={content.slice(last)} />);
-  return <div className="markdown space-y-2 break-words">{parts}</div>;
+  return <div className="prose-chat text-[15px]">{parts}</div>;
 }
 
 function Inline({ text }: { text: string }) {
@@ -37,20 +41,19 @@ function Inline({ text }: { text: string }) {
   let list: string[] = [];
   let olist: string[] = [];
   const flush = () => {
-    if (list.length) { blocks.push(<ul key={'ul'+blocks.length} className="ml-5 list-disc space-y-1">{list.map((x,i)=><li key={i}>{renderInline(x)}</li>)}</ul>); list = []; }
-    if (olist.length) { blocks.push(<ol key={'ol'+blocks.length} className="ml-5 list-decimal space-y-1">{olist.map((x,i)=><li key={i}>{renderInline(x)}</li>)}</ol>); olist = []; }
+    if (list.length) { blocks.push(<ul key={'ul'+blocks.length}>{list.map((x,i)=><li key={i}>{renderInline(x)}</li>)}</ul>); list = []; }
+    if (olist.length) { blocks.push(<ol key={'ol'+blocks.length}>{olist.map((x,i)=><li key={i}>{renderInline(x)}</li>)}</ol>); olist = []; }
   };
   for (const raw of lines) {
-    const line = raw;
-    if (/^[-*]\s+/.test(line)) { olist.length && flush(); list.push(line.replace(/^[-*]\s+/, '')); continue; }
-    if (/^\d+\.\s+/.test(line)) { list.length && flush(); olist.push(line.replace(/^\d+\.\s+/, '')); continue; }
+    if (/^[-*]\s+/.test(raw)) { olist.length && flush(); list.push(raw.replace(/^[-*]\s+/, '')); continue; }
+    if (/^\d+\.\s+/.test(raw)) { list.length && flush(); olist.push(raw.replace(/^\d+\.\s+/, '')); continue; }
     flush();
-    if (!line.trim()) { blocks.push(<div key={blocks.length} className="h-1" />); continue; }
-    if (/^###\s/.test(line)) blocks.push(<h4 key={blocks.length} className="pt-1 text-base font-semibold text-cyan-200">{renderInline(line.replace(/^###\s+/, ''))}</h4>);
-    else if (/^##\s/.test(line)) blocks.push(<h3 key={blocks.length} className="pt-1 text-lg font-semibold text-cyan-100">{renderInline(line.replace(/^##\s+/, ''))}</h3>);
-    else if (/^#\s/.test(line)) blocks.push(<h2 key={blocks.length} className="pt-1 text-xl font-semibold text-white">{renderInline(line.replace(/^#\s+/, ''))}</h2>);
-    else if (/^>\s?/.test(line)) blocks.push(<blockquote key={blocks.length} className="border-l-2 border-cyan-500/40 pl-3 text-gray-300">{renderInline(line.replace(/^>\s?/, ''))}</blockquote>);
-    else blocks.push(<p key={blocks.length} className="leading-7 text-gray-100">{renderInline(line)}</p>);
+    if (!raw.trim()) { blocks.push(<div key={blocks.length} className="h-2" />); continue; }
+    if (/^###\s/.test(raw)) blocks.push(<h4 key={blocks.length}>{renderInline(raw.replace(/^###\s+/, ''))}</h4>);
+    else if (/^##\s/.test(raw)) blocks.push(<h3 key={blocks.length}>{renderInline(raw.replace(/^##\s+/, ''))}</h3>);
+    else if (/^#\s/.test(raw)) blocks.push(<h2 key={blocks.length}>{renderInline(raw.replace(/^#\s+/, ''))}</h2>);
+    else if (/^>\s?/.test(raw)) blocks.push(<blockquote key={blocks.length}>{renderInline(raw.replace(/^>\s?/, ''))}</blockquote>);
+    else blocks.push(<p key={blocks.length}>{renderInline(raw)}</p>);
   }
   flush();
   return <>{blocks}</>;
@@ -60,11 +63,11 @@ function renderInline(text: string): React.ReactNode[] {
   const html = escapeHtml(text);
   const tokens = html.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g);
   return tokens.map((t, i) => {
-    if (t.startsWith('`') && t.endsWith('`')) return <code key={i} className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[0.92em] text-cyan-100">{t.slice(1,-1)}</code>;
-    if (t.startsWith('**') && t.endsWith('**')) return <strong key={i} className="font-semibold text-white">{t.slice(2,-2)}</strong>;
-    if (t.startsWith('*') && t.endsWith('*')) return <em key={i} className="text-gray-200">{t.slice(1,-1)}</em>;
+    if (t.startsWith('`') && t.endsWith('`')) return <code key={i}>{t.slice(1,-1)}</code>;
+    if (t.startsWith('**') && t.endsWith('**')) return <strong key={i}>{t.slice(2,-2)}</strong>;
+    if (t.startsWith('*') && t.endsWith('*')) return <em key={i}>{t.slice(1,-1)}</em>;
     const lm = t.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-    if (lm) return <a key={i} href={lm[2]} target="_blank" rel="noreferrer" className="text-cyan-300 underline decoration-cyan-500/40 underline-offset-2">{lm[1]}</a>;
+    if (lm) return <a key={i} href={lm[2]} target="_blank" rel="noreferrer">{lm[1]}</a>;
     return <React.Fragment key={i}>{t}</React.Fragment>;
   });
 }
