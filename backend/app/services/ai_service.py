@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -7,235 +8,240 @@ import httpx
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 class AethrixAIService:
-    """AI orchestration layer for chat, tools, and model access."""
+    """AI orchestration with OpenAI-compatible provider support, Ollama fallback, and streaming."""
 
     SYSTEM_PROMPTS = {
-        "assistant": "You are AETHRIX, a highly intelligent, reliable AI assistant. Reason carefully, be accurate, and adapt to the user. Use clear structure, ask focused clarifying questions only when necessary, and provide actionable answers.",
-        "coder": "You are AETHRIX Coder, an expert software engineer. Write correct, secure, maintainable solutions. Explain tradeoffs briefly, include edge cases, and prefer practical code.",
-        "writer": "You are AETHRIX Writer. Produce polished, audience-aware writing with strong structure, clarity, and tone control.",
-        "research": "You are AETHRIX Research. Analyze carefully, distinguish evidence from inference, identify uncertainty, and present balanced conclusions.",
-        "tutor": "You are AETHRIX Tutor. Teach step by step, calibrate difficulty, use examples, and end with a quick check for understanding when helpful.",
-        "planner": "You are AETHRIX Planner. Turn goals into concrete plans with priorities, dependencies, risks, and next actions.",
+        "assistant": (
+            "You are AETHRIX, a highly intelligent, knowledgeable, and helpful AI assistant. "
+            "Answer questions on any topic clearly, accurately, and elaborately when useful. "
+            "Understand the user's intent, provide practical and well-structured responses, and adapt tone to the context. "
+            "When solving problems, explain reasoning, give step-by-step guidance, cover important edge cases, and offer examples. "
+            "If information is uncertain or time-sensitive, state assumptions and limits honestly. "
+            "Ask a brief clarifying question only when truly necessary; otherwise make reasonable assumptions and proceed. "
+            "Use markdown formatting (headings, lists, tables, code blocks) when it improves readability."
+        ),
+        "coder": (
+            "You are AETHRIX Coder, an expert software engineer. Provide correct, secure, maintainable, and well-explained solutions. "
+            "Include code examples, edge cases, testing guidance, and tradeoffs. Prefer practical production-ready approaches."
+        ),
+        "writer": (
+            "You are AETHRIX Writer. Produce polished, clear, audience-aware writing with strong structure and tone control. "
+            "Revise as needed and explain choices briefly when helpful."
+        ),
+        "research": (
+            "You are AETHRIX Research. Provide comprehensive, balanced analysis. Distinguish evidence from inference, note uncertainty, "
+            "compare viewpoints when relevant, and end with actionable conclusions."
+        ),
+        "tutor": (
+            "You are AETHRIX Tutor. Teach patiently and step by step, calibrate to the learner's level, use examples/analogies, "
+            "check understanding, and suggest practice."
+        ),
+        "planner": (
+            "You are AETHRIX Planner. Turn goals into concrete plans with priorities, sequencing, dependencies, risks, timelines, and next actions."
+        ),
     }
 
     def __init__(self):
         self.ollama_url = settings.OLLAMA_BASE_URL.rstrip("/")
-        self.default_chat_model = settings.DEFAULT_CHAT_MODEL
+
+    @property
+    def default_chat_model(self) -> str:
+        return settings.resolved_ai_model() or settings.DEFAULT_CHAT_MODEL
 
     def available_models(self) -> List[Dict[str, Any]]:
         configured = os.getenv("AETHRIX_MODELS", "")
         extra = [m.strip() for m in configured.split(",") if m.strip()]
-        base = [
-            {"id": "auto", "name": "AETHRIX Auto", "provider": "aethrix"},
-            {"id": self.default_chat_model, "name": self.default_chat_model, "provider": "ollama"},
-            {"id": "llama3.1", "name": "Llama 3.1", "provider": "ollama"},
-            {"id": "qwen2.5:7b", "name": "Qwen 2.5 7B", "provider": "ollama"},
-            {"id": "mistral", "name": "Mistral", "provider": "ollama"},
-            {"id": "deepseek-r1:8b", "name": "DeepSeek R1 8B", "provider": "ollama"},
-        ]
-        seen = set()
-        out = []
-        for m in base + [{"id": x, "name": x, "provider": "ollama"} for x in extra]:
-            if m["id"] not in seen:
-                seen.add(m["id"])
-                out.append(m)
-        return out
+        base = [{"id": "auto", "name": "Auto (Recommended)", "provider": "auto"}]
+        resolved = settings.resolved_ai_model()
+        if resolved:
+            base.append({"id": resolved, "name": resolved, "provider": "configured"})
+        for m in [settings.DEFAULT_CHAT_MODEL, "gpt-4o-mini", "gpt-4.1-mini", "claude-3.5-sonnet", "llama3.1", "qwen2.5:7b", "mistral", *extra]:
+            if m and not any(x["id"] == m for x in base):
+                base.append({"id": m, "name": m, "provider": "model"})
+        return base
 
     async def detect_ollama_models(self) -> List[str]:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=4.0) as client:
                 r = await client.get(f"{self.ollama_url}/api/tags")
                 if r.status_code == 200:
                     data = r.json() or {}
                     return [m.get("name") for m in data.get("models", []) if m.get("name")]
         except Exception:
-            pass
+            return []
         return []
 
     def _normalize_messages(self, messages: List[Dict[str, str]], mode: str = "assistant", system: Optional[str] = None) -> List[Dict[str, str]]:
-        sys_prompt = system or self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["assistant"])
+        sys_prompt = (system or "").strip() or self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["assistant"])
         cleaned = [{"role": "system", "content": sys_prompt}]
         for m in messages or []:
-            role = (m.get("role") or "user").lower()
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "user").lower()
             if role not in {"user", "assistant", "system"}:
                 role = "user"
-            content = (m.get("content") or "").strip()
+            content = str(m.get("content") or "").strip()
             if not content:
                 continue
             if role == "system":
                 continue
             cleaned.append({"role": role, "content": content})
-        return cleaned[-40:]
+        # Keep recent context; provider/model limits vary.
+        if len(cleaned) > 61:
+            cleaned = [cleaned[0]] + cleaned[-60:]
+        return cleaned
 
-    def _fallback_response(self, messages: List[Dict[str, str]], mode: str) -> str:
-        last = ""
-        for m in reversed(messages or []):
-            if m.get("role") == "user":
-                last = (m.get("content") or "").strip()
-                break
-        if not last:
-            return "I’m AETHRIX. Share a question, task, or idea and I’ll help."
+    def _provider_candidates(self) -> List[Dict[str, str]]:
+        candidates: List[Dict[str, str]] = []
+        base = (settings.resolved_ai_base_url() or "").rstrip("/")
+        key = settings.resolved_ai_api_key() or ""
+        if base:
+            # Try common OpenAI-compatible paths.
+            bases = []
+            for b in [base, base + "/v1" if not base.endswith("/v1") else base, base.replace("/v1", "")]:
+                b = b.rstrip("/")
+                if b and b not in bases:
+                    bases.append(b)
+            for b in bases:
+                candidates.append({"type": "openai", "base": b, "key": key})
+        # Ollama OpenAI-compatible endpoint
+        candidates.append({"type": "ollama", "base": self.ollama_url, "key": ""})
+        return candidates
 
-        # Lightweight local reasoning fallback to keep the app useful without a model backend.
-        lower = last.lower()
-        if mode == "coder" or any(k in lower for k in ["code", "bug", "function", "api", "typescript", "python", "sql"]):
-            return (
-                "## Analysis\n"
-                f"I can help with: **{last[:180]}{'…' if len(last)>180 else ''}**\n\n"
-                "## Recommended approach\n"
-                "1. Clarify inputs, outputs, and constraints.\n"
-                "2. Implement the smallest correct solution.\n"
-                "3. Add edge-case handling and validation.\n"
-                "4. Verify with focused tests or manual checks.\n\n"
-                "## Next step\n"
-                "Paste the relevant code, error, or expected behavior and I’ll provide a concrete fix.\n\n"
-                "_Note: A local/open-source model backend (e.g. Ollama) is not currently reachable, so this is AETHRIX’s built-in fallback assistant._"
-            )
-        if any(k in lower for k in ["summar", "tl;dr"]):
-            return (
-                "## Summary (fallback mode)\n"
-                "- I need the source text or key points to produce an accurate summary.\n"
-                "- I can extract decisions, risks, and action items once provided.\n\n"
-                "Paste the content and specify length (brief/detailed) and audience."
-            )
-        if any(k in lower for k in ["plan", "roadmap", "steps", "how to"]):
-            return (
-                f"## Plan\n**Goal:** {last[:200]}\n\n"
-                "1. **Define success** — what outcome proves this is done?\n"
-                "2. **Break into tasks** — smallest executable steps.\n"
-                "3. **Identify blockers** — dependencies, access, unknowns.\n"
-                "4. **Execute & verify** — complete highest-impact step first.\n"
-                "5. **Review** — measure results and iterate.\n\n"
-                "Share constraints (time, tools, context) for a tailored plan."
-            )
+    async def _openai_chat(self, client: httpx.AsyncClient, base: str, key: str, payload: Dict[str, Any]) -> Optional[str]:
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        # Some gateways may not want /v1 prefix twice; try both.
+        paths = ["/chat/completions", "/v1/chat/completions", "/api/v1/chat/completions"]
+        tried = set()
+        for path in paths:
+            for b in [base.rstrip("/"), base.rstrip("/").replace("/v1", "")]:
+                url = b.rstrip("/") + path
+                if url in tried:
+                    continue
+                tried.add(url)
+                try:
+                    r = await client.post(url, json=payload, headers=headers)
+                    if r.status_code == 200:
+                        data = r.json()
+                        content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+                        if isinstance(content, str) and content.strip():
+                            return content
+                    # 401/403/404 may indicate wrong path or auth; continue trying candidates.
+                except Exception:
+                    continue
+        return None
+
+    async def _openai_stream(self, client: httpx.AsyncClient, base: str, key: str, payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        paths = ["/chat/completions", "/v1/chat/completions", "/api/v1/chat/completions"]
+        tried = set()
+        for path in paths:
+            for b in [base.rstrip("/"), base.rstrip("/").replace("/v1", "")]:
+                url = b.rstrip("/") + path
+                if url in tried:
+                    continue
+                tried.add(url)
+                try:
+                    async with client.stream("POST", url, json={**payload, "stream": True}, headers=headers) as r:
+                        if r.status_code != 200:
+                            continue
+                        sent = False
+                        async for line in r.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            if line == "[DONE]":
+                                if sent:
+                                    return
+                                break
+                            try:
+                                obj = json.loads(line)
+                            except Exception:
+                                continue
+                            choice = (obj.get("choices") or [{}])[0]
+                            delta = ((choice.get("delta") or {}).get("content")) or ((choice.get("message") or {}).get("content"))
+                            if isinstance(delta, str) and delta:
+                                sent = True
+                                yield delta
+                        if sent:
+                            return
+                except Exception:
+                    continue
+        return
+
+    def _setup_message(self, mode: str) -> str:
         return (
-            "## AETHRIX Response\n"
-            f"You asked: _{last[:240]}{'…' if len(last)>240 else ''}_\n\n"
-            "I can help by:\n"
-            "- breaking the problem into clear parts,\n"
-            "- giving a direct answer with assumptions stated,\n"
-            "- suggesting practical next steps.\n\n"
-            "Add any important context (goal, constraints, examples), and I’ll refine this into a precise answer.\n\n"
-            "_Model backend unavailable; running in intelligent fallback mode._"
+            "## AI backend setup needed\n"
+            "I can’t reach a configured language model right now, so I can’t generate a full live answer yet.\n\n"
+            "To enable powerful, elaborate chat on Vercel or your server, set one of these configurations:\n"
+            "- **OpenAI-compatible API (recommended):** `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`\n"
+            "- **OpenAI:** `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL`, `AI_MODEL`\n"
+            "- **OpenRouter/Groq/Together/etc.:** use their OpenAI-compatible base URL + API key in `AI_BASE_URL`/`AI_API_KEY`\n"
+            "- **Local/self-hosted:** run Ollama and set `OLLAMA_BASE_URL` and `DEFAULT_CHAT_MODEL`\n\n"
+            f"Current mode: **{mode}**. Once configured, AETHRIX will answer questions on any topic with detailed, structured responses and streaming."
         )
 
-    async def chat_completion(
-        self,
-        messages: List[Dict[str, str]],
-        model: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: int = 2048,
-        mode: str = "assistant",
-        system: Optional[str] = None,
-    ) -> str:
-        model = (model or self.default_chat_model).strip()
+    async def chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> str:
+        model = (model or self.default_chat_model or "gpt-4o-mini").strip()
         if model == "auto":
-            model = self.default_chat_model
+            model = self.default_chat_model or "gpt-4o-mini"
         payload_messages = self._normalize_messages(messages, mode=mode, system=system)
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{self.ollama_url}/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "messages": payload_messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": False,
-                    },
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
-                    if content:
-                        return content
-        except Exception:
-            pass
-        return self._fallback_response(messages, mode)
+        payload = {"model": model, "messages": payload_messages, "temperature": max(0.0, min(float(temperature or 0.7), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
+        timeout = httpx.Timeout(180.0, connect=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for cand in self._provider_candidates():
+                content = await self._openai_chat(client, cand["base"], cand.get("key", ""), payload)
+                if content:
+                    return content
+        return self._setup_message(mode)
 
-    async def stream_chat_completion(
-        self,
-        messages: List[Dict[str, str]],
-        model: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: int = 2048,
-        mode: str = "assistant",
-        system: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
-        model = (model or self.default_chat_model).strip()
+    async def stream_chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> AsyncGenerator[str, None]:
+        model = (model or self.default_chat_model or "gpt-4o-mini").strip()
         if model == "auto":
-            model = self.default_chat_model
+            model = self.default_chat_model or "gpt-4o-mini"
         payload_messages = self._normalize_messages(messages, mode=mode, system=system)
-        try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.ollama_url}/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "messages": payload_messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": True,
-                    },
-                ) as response:
-                    if response.status_code != 200:
-                        text = self._fallback_response(messages, mode)
-                        for chunk in re.findall(r".{1,80}(?:\s+|$)", text, re.S):
-                            yield chunk
-                        return
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if line == "[DONE]":
-                            break
-                        try:
-                            obj = json.loads(line)
-                            delta = (((obj.get("choices") or [{}])[0]).get("delta") or {}).get("content")
-                            if delta:
-                                yield delta
-                        except Exception:
-                            continue
+        payload = {"model": model, "messages": payload_messages, "temperature": max(0.0, min(float(temperature or 0.7), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
+        timeout = httpx.Timeout(None, connect=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for cand in self._provider_candidates():
+                sent = False
+                async for chunk in self._openai_stream(client, cand["base"], cand.get("key", ""), payload):
+                    sent = True
+                    yield chunk
+                if sent:
                     return
-        except Exception:
-            text = self._fallback_response(messages, mode)
-            for chunk in re.findall(r".{1,80}(?:\s+|$)", text, re.S):
-                yield chunk
+        for chunk in re.findall(r".{1,120}(?:\s+|$)", self._setup_message(mode), re.S):
+            yield chunk
 
     async def generate_image(self, prompt: str, model: Optional[str] = None, width: int = 1024, height: int = 1024) -> Dict[str, Any]:
-        model = model or settings.DEFAULT_IMAGE_MODEL
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                # Optional local image backend compatibility.
-                r = await client.post(f"{self.ollama_url}/api/generate-image", json={"model": model, "prompt": prompt, "width": width, "height": height})
-                if r.status_code == 200:
-                    return r.json()
-        except Exception:
-            pass
         return {
             "status": "ready",
-            "message": "Image generation request accepted. Connect a local diffusion backend for real rendering; AETHRIX returned a structured creative result.",
             "prompt": prompt,
-            "model": model,
+            "model": model or settings.DEFAULT_IMAGE_MODEL,
             "width": width,
             "height": height,
-            "image_url": f"https://image.pollinations.ai/prompt/{httpx.QueryParams({'q': prompt})['q']}" if prompt else None,
+            "image_url": f"https://image.pollinations.ai/prompt/{httpx.QueryParams({'prompt': prompt, 'width': width, 'height': height})['prompt']}" if prompt else None,
         }
 
     async def generate_email(self, purpose: str, recipient: str, tone: str = "professional", details: str = "") -> str:
-        messages = [{"role": "user", "content": f"Write an email.\nRecipient: {recipient}\nPurpose: {purpose}\nTone: {tone}\nDetails: {details}\nInclude a clear subject line."}]
+        messages = [{"role": "user", "content": f"Write an email.\nRecipient: {recipient}\nPurpose: {purpose}\nTone: {tone}\nDetails: {details}\nInclude a clear subject line and polished body."}]
         return await self.chat_completion(messages, mode="writer")
 
     async def create_document(self, doc_type: str, topic: str, requirements: str = "") -> str:
-        messages = [{"role": "user", "content": f"Create a {doc_type}.\nTopic: {topic}\nRequirements: {requirements}\nUse clear headings and practical content."}]
+        messages = [{"role": "user", "content": f"Create a high-quality {doc_type}.\nTopic: {topic}\nRequirements: {requirements}\nUse clear headings, structured sections, and practical detail."}]
         return await self.chat_completion(messages, mode="writer")
 
     async def research(self, query: str, depth: str = "standard") -> Dict[str, Any]:
-        messages = [{"role": "user", "content": f"Research request ({depth}): {query}\nProvide key findings, implications, uncertainties, and recommended next steps."}]
+        messages = [{"role": "user", "content": f"Research request ({depth}).\nTopic: {query}\nProvide an elaborate, well-structured response with background, key findings, implications, limitations/uncertainty, and recommended next steps."}]
         content = await self.chat_completion(messages, mode="research")
         return {"query": query, "content": content, "sources": [], "depth": depth}
 
