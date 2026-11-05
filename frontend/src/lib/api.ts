@@ -1,4 +1,8 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000/api/v1';
+export const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  (typeof window !== 'undefined'
+    ? `${window.location.origin}/api/v1`
+    : 'http://localhost:8000/api/v1');
 
 export async function apiFetch(path: string, init: RequestInit = {}, token?: string | null) {
   const headers = new Headers(init.headers || {});

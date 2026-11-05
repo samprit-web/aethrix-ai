@@ -17,12 +17,13 @@ class AethrixAIService:
     SYSTEM_PROMPTS = {
         "assistant": (
             "You are AETHRIX, a highly intelligent, knowledgeable, and helpful AI assistant. "
-            "Answer questions on any topic clearly, accurately, and elaborately when useful. "
-            "Understand the user's intent, provide practical and well-structured responses, and adapt tone to the context. "
-            "When solving problems, explain reasoning, give step-by-step guidance, cover important edge cases, and offer examples. "
-            "If information is uncertain or time-sensitive, state assumptions and limits honestly. "
-            "Ask a brief clarifying question only when truly necessary; otherwise make reasonable assumptions and proceed. "
-            "Use markdown formatting (headings, lists, tables, code blocks) when it improves readability."
+            "Your top priorities are correctness, logical reasoning, clarity, and usefulness. "
+            "Before answering, identify what the user is asking, resolve ambiguity from context when possible, and choose the most accurate approach. "
+            "Think step by step for complex questions: check assumptions, verify logic, consider edge cases, and avoid unsupported claims. "
+            "For factual topics, be precise; if you are uncertain, outdated, or lack sources, say so clearly and explain what is known. "
+            "For math, coding, and technical problems, show the method, validate the result when practical, and provide working examples. "
+            "Give elaborate answers when helpful, but keep them organized with headings, lists, tables, or code blocks. "
+            "Adapt to the user's language and level, be conversational and respectful, and ask a brief clarifying question only when necessary."
         ),
         "coder": (
             "You are AETHRIX Coder, an expert software engineer. Provide correct, secure, maintainable, and well-explained solutions. "
@@ -178,16 +179,29 @@ class AethrixAIService:
                     continue
         return
 
+    def has_provider_config(self) -> bool:
+        return bool(settings.resolved_ai_base_url() or settings.resolved_ai_api_key() or settings.OLLAMA_BASE_URL)
+
+    def status(self) -> Dict[str, Any]:
+        base = settings.resolved_ai_base_url() or ""
+        return {
+            "ready": self.has_provider_config(),
+            "model": self.default_chat_model,
+            "provider_hint": "openai-compatible" if base else "ollama/local",
+            "base_configured": bool(base),
+            "key_configured": bool(settings.resolved_ai_api_key()),
+        }
+
     def _setup_message(self, mode: str) -> str:
         return (
-            "## AI backend setup needed\n"
-            "I can’t reach a configured language model right now, so I can’t generate a full live answer yet.\n\n"
-            "To enable powerful, elaborate chat on Vercel or your server, set one of these configurations:\n"
-            "- **OpenAI-compatible API (recommended):** `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`\n"
-            "- **OpenAI:** `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL`, `AI_MODEL`\n"
-            "- **OpenRouter/Groq/Together/etc.:** use their OpenAI-compatible base URL + API key in `AI_BASE_URL`/`AI_API_KEY`\n"
-            "- **Local/self-hosted:** run Ollama and set `OLLAMA_BASE_URL` and `DEFAULT_CHAT_MODEL`\n\n"
-            f"Current mode: **{mode}**. Once configured, AETHRIX will answer questions on any topic with detailed, structured responses and streaming."
+            "## AI setup required for live, accurate answers\n"
+            "AETHRIX’s chat UI is deployed, but it needs a live language-model provider to answer questions correctly and logically across topics.\n\n"
+            "**Set these Vercel/host environment variables (recommended: OpenAI-compatible):**\n"
+            "- `AI_BASE_URL` — provider API base URL (OpenAI-compatible)\n"
+            "- `AI_API_KEY` — provider API key\n"
+            "- `AI_MODEL` — model name (choose a capable model for best accuracy)\n\n"
+            "**Also supported:** `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`, `AI_MODEL`), or OpenRouter/Groq/Together equivalents via `AI_BASE_URL`/`AI_API_KEY`. For self-hosting, use `OLLAMA_BASE_URL` and `DEFAULT_CHAT_MODEL`.\n\n"
+            f"Current mode: **{mode}**. After setting variables, redeploy/restart the backend and send your question again."
         )
 
     async def chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> str:

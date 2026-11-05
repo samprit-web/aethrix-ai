@@ -44,7 +44,17 @@ async def list_models():
     for name in detected:
         if not any(m["id"] == name for m in models):
             models.append({"id": name, "name": name, "provider": "ollama", "detected": True})
-    return {"models": models, "default": ai_service.default_chat_model, "detected": detected}
+    return {
+        "models": models,
+        "default": ai_service.default_chat_model,
+        "detected": detected,
+        "provider_configured": bool(ai_service.has_provider_config()),
+    }
+
+
+@router.get("/status")
+async def chat_status():
+    return ai_service.status()
 
 
 def _history_from_request(request: ChatRequest, db: Session, current_user: Optional[User]):
