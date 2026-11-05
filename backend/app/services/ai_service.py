@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -7,257 +6,231 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 
 from app.core.config import settings
-
-logger = logging.getLogger(__name__)
+from app.services.engine import capability_notice, deterministic_response, last_user_text
 
 
 class AethrixAIService:
-    """AI orchestration with OpenAI-compatible provider support, Ollama fallback, and streaming."""
+    """
+    Owned AETHRIX orchestration.
+    - Always available: owned API + deterministic engine (verified math, etc.).
+    - For broad open-domain intelligence: connects to a SELF-HOSTED model endpoint
+      controlled by the operator (Ollama / OpenAI-compatible gateway on your infra).
+      No commercial AI assistant APIs are hardcoded.
+    """
 
     SYSTEM_PROMPTS = {
         "assistant": (
-            "You are AETHRIX, a highly intelligent, knowledgeable, and helpful AI assistant. "
-            "Your top priorities are correctness, logical reasoning, clarity, and usefulness. "
-            "Before answering, identify what the user is asking, resolve ambiguity from context when possible, and choose the most accurate approach. "
-            "Think step by step for complex questions: check assumptions, verify logic, consider edge cases, and avoid unsupported claims. "
-            "For factual topics, be precise; if you are uncertain, outdated, or lack sources, say so clearly and explain what is known. "
-            "For math, coding, and technical problems, show the method, validate the result when practical, and provide working examples. "
-            "Give elaborate answers when helpful, but keep them organized with headings, lists, tables, or code blocks. "
-            "Adapt to the user's language and level, be conversational and respectful, and ask a brief clarifying question only when necessary."
+            "You are AETHRIX, a highly intelligent assistant running on the user's own platform. "
+            "Your priorities are correctness, logical reasoning, honesty, and usefulness. "
+            "Understand intent, reason step by step, verify logic/math when possible, consider edge cases, and state uncertainty clearly. "
+            "Give elaborate, structured answers (markdown headings/lists/tables/code blocks) when helpful. "
+            "Never fabricate facts; if unsure, say what you know, what you assume, and how to verify."
         ),
-        "coder": (
-            "You are AETHRIX Coder, an expert software engineer. Provide correct, secure, maintainable, and well-explained solutions. "
-            "Include code examples, edge cases, testing guidance, and tradeoffs. Prefer practical production-ready approaches."
-        ),
-        "writer": (
-            "You are AETHRIX Writer. Produce polished, clear, audience-aware writing with strong structure and tone control. "
-            "Revise as needed and explain choices briefly when helpful."
-        ),
-        "research": (
-            "You are AETHRIX Research. Provide comprehensive, balanced analysis. Distinguish evidence from inference, note uncertainty, "
-            "compare viewpoints when relevant, and end with actionable conclusions."
-        ),
-        "tutor": (
-            "You are AETHRIX Tutor. Teach patiently and step by step, calibrate to the learner's level, use examples/analogies, "
-            "check understanding, and suggest practice."
-        ),
-        "planner": (
-            "You are AETHRIX Planner. Turn goals into concrete plans with priorities, sequencing, dependencies, risks, timelines, and next actions."
-        ),
+        "coder": "You are AETHRIX Coder. Give correct, secure, maintainable solutions with explanations, edge cases, and verification steps.",
+        "writer": "You are AETHRIX Writer. Produce clear, polished, audience-aware writing.",
+        "research": "You are AETHRIX Research. Analyze carefully, separate facts from inference, note uncertainty, and give actionable conclusions.",
+        "tutor": "You are AETHRIX Tutor. Teach step by step, adapt to level, use examples, and check understanding.",
+        "planner": "You are AETHRIX Planner. Produce concrete plans with priorities, dependencies, risks, and next actions.",
     }
 
     def __init__(self):
-        self.ollama_url = settings.OLLAMA_BASE_URL.rstrip("/")
+        self.ollama_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip("/")
 
     @property
     def default_chat_model(self) -> str:
-        return settings.resolved_ai_model() or settings.DEFAULT_CHAT_MODEL
+        return settings.resolved_ai_model() or settings.DEFAULT_CHAT_MODEL or "llama3.1"
+
+    def status(self) -> Dict[str, Any]:
+        base = (settings.resolved_ai_base_url() or "").strip()
+        return {
+            "ready": True,
+            "engine": "aethrix-owned",
+            "commercial_api_dependency": False,
+            "self_hosted_endpoint_configured": bool(base or self.ollama_url),
+            "model": self.default_chat_model,
+            "capabilities": {
+                "verified_math": True,
+                "chat_api": True,
+                "streaming": True,
+                "open_domain_requires_self_hosted_model": True,
+            },
+        }
+
+    def has_provider_config(self) -> bool:
+        return bool((settings.resolved_ai_base_url() or "").strip() or self.ollama_url)
 
     def available_models(self) -> List[Dict[str, Any]]:
-        configured = os.getenv("AETHRIX_MODELS", "")
-        extra = [m.strip() for m in configured.split(",") if m.strip()]
-        base = [{"id": "auto", "name": "Auto (Recommended)", "provider": "auto"}]
-        resolved = settings.resolved_ai_model()
-        if resolved:
-            base.append({"id": resolved, "name": resolved, "provider": "configured"})
-        for m in [settings.DEFAULT_CHAT_MODEL, "gpt-4o-mini", "gpt-4.1-mini", "claude-3.5-sonnet", "llama3.1", "qwen2.5:7b", "mistral", *extra]:
-            if m and not any(x["id"] == m for x in base):
-                base.append({"id": m, "name": m, "provider": "model"})
-        return base
+        out = [{"id": "auto", "name": "AETHRIX Auto", "provider": "aethrix"}]
+        m = self.default_chat_model
+        if m and not any(x["id"] == m for x in out):
+            out.append({"id": m, "name": m, "provider": "self-hosted"})
+        for x in ["llama3.1", "qwen2.5:7b", "mistral", "gemma2:9b", "phi4", "deepseek-r1:8b"]:
+            if not any(i["id"] == x for i in out):
+                out.append({"id": x, "name": x, "provider": "self-hosted"})
+        return out
 
     async def detect_ollama_models(self) -> List[str]:
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=3.0) as client:
                 r = await client.get(f"{self.ollama_url}/api/tags")
                 if r.status_code == 200:
-                    data = r.json() or {}
-                    return [m.get("name") for m in data.get("models", []) if m.get("name")]
+                    return [m.get("name") for m in (r.json() or {}).get("models", []) if m.get("name")]
         except Exception:
-            return []
+            pass
         return []
 
     def _normalize_messages(self, messages: List[Dict[str, str]], mode: str = "assistant", system: Optional[str] = None) -> List[Dict[str, str]]:
-        sys_prompt = (system or "").strip() or self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["assistant"])
-        cleaned = [{"role": "system", "content": sys_prompt}]
+        sys = (system or "").strip() or self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["assistant"])
+        cleaned = [{"role": "system", "content": sys}]
         for m in messages or []:
             if not isinstance(m, dict):
                 continue
             role = str(m.get("role") or "user").lower()
-            if role not in {"user", "assistant", "system"}:
-                role = "user"
+            if role not in {"user", "assistant"}:
+                continue
             content = str(m.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "system":
-                continue
-            cleaned.append({"role": role, "content": content})
-        # Keep recent context; provider/model limits vary.
-        if len(cleaned) > 61:
-            cleaned = [cleaned[0]] + cleaned[-60:]
-        return cleaned
+            if content:
+                cleaned.append({"role": role, "content": content})
+        return [cleaned[0]] + cleaned[-60:] if len(cleaned) > 61 else cleaned
 
-    def _provider_candidates(self) -> List[Dict[str, str]]:
-        candidates: List[Dict[str, str]] = []
+    def _candidates(self):
+        out = []
         base = (settings.resolved_ai_base_url() or "").rstrip("/")
         key = settings.resolved_ai_api_key() or ""
         if base:
-            # Try common OpenAI-compatible paths.
-            bases = []
-            for b in [base, base + "/v1" if not base.endswith("/v1") else base, base.replace("/v1", "")]:
-                b = b.rstrip("/")
-                if b and b not in bases:
-                    bases.append(b)
-            for b in bases:
-                candidates.append({"type": "openai", "base": b, "key": key})
-        # Ollama OpenAI-compatible endpoint
-        candidates.append({"type": "ollama", "base": self.ollama_url, "key": ""})
-        return candidates
+            out.append({"base": base, "key": key, "kind": "openai"})
+            if not base.endswith("/v1"):
+                out.append({"base": base + "/v1", "key": key, "kind": "openai"})
+        # Self-hosted Ollama on operator-controlled host
+        out.append({"base": self.ollama_url, "key": "", "kind": "ollama"})
+        out.append({"base": self.ollama_url + "/v1", "key": "", "kind": "openai"})
+        # de-dupe
+        seen = set(); res = []
+        for c in out:
+            k = (c["base"], c["kind"])
+            if k not in seen:
+                seen.add(k); res.append(c)
+        return res
 
-    async def _openai_chat(self, client: httpx.AsyncClient, base: str, key: str, payload: Dict[str, Any]) -> Optional[str]:
+    async def _try_generate(self, client: httpx.AsyncClient, cand: Dict[str, str], payload: Dict[str, Any]) -> Optional[str]:
         headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        # Some gateways may not want /v1 prefix twice; try both.
-        paths = ["/chat/completions", "/v1/chat/completions", "/api/v1/chat/completions"]
-        tried = set()
-        for path in paths:
-            for b in [base.rstrip("/"), base.rstrip("/").replace("/v1", "")]:
-                url = b.rstrip("/") + path
-                if url in tried:
+        if cand.get("key"):
+            headers["Authorization"] = f"Bearer {cand['key']}"
+        attempts = []
+        if cand["kind"] == "openai":
+            attempts = [("/chat/completions", payload), ("/v1/chat/completions", payload)]
+        else:
+            attempts = [
+                ("/api/chat", {"model": payload["model"], "messages": payload["messages"], "stream": False, "options": {"temperature": payload.get("temperature", 0.4), "num_predict": payload.get("max_tokens", 2048)}}),
+                ("/chat/completions", payload),
+            ]
+        for path, body in attempts:
+            url = cand["base"].rstrip("/") + path
+            url = url.replace("/v1/v1/", "/v1/")
+            try:
+                r = await client.post(url, json=body, headers=headers)
+                if r.status_code != 200:
                     continue
-                tried.add(url)
-                try:
-                    r = await client.post(url, json=payload, headers=headers)
-                    if r.status_code == 200:
-                        data = r.json()
-                        content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
-                        if isinstance(content, str) and content.strip():
-                            return content
-                    # 401/403/404 may indicate wrong path or auth; continue trying candidates.
-                except Exception:
-                    continue
+                data = r.json() if r.content else {}
+                text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+                if not text:
+                    text = ((data.get("message") or {}).get("content"))
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            except Exception:
+                continue
         return None
 
-    async def _openai_stream(self, client: httpx.AsyncClient, base: str, key: str, payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    async def _stream_generate(self, client: httpx.AsyncClient, cand: Dict[str, str], payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
         headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        paths = ["/chat/completions", "/v1/chat/completions", "/api/v1/chat/completions"]
-        tried = set()
-        for path in paths:
-            for b in [base.rstrip("/"), base.rstrip("/").replace("/v1", "")]:
-                url = b.rstrip("/") + path
-                if url in tried:
-                    continue
-                tried.add(url)
-                try:
-                    async with client.stream("POST", url, json={**payload, "stream": True}, headers=headers) as r:
-                        if r.status_code != 200:
+        if cand.get("key"):
+            headers["Authorization"] = f"Bearer {cand['key']}"
+        attempts = []
+        if cand["kind"] == "openai":
+            attempts = [("/chat/completions", {**payload, "stream": True}), ("/v1/chat/completions", {**payload, "stream": True})]
+        else:
+            attempts = [("/api/chat", {"model": payload["model"], "messages": payload["messages"], "stream": True, "options": {"temperature": payload.get("temperature", 0.4), "num_predict": payload.get("max_tokens", 2048)}})]
+        for path, body in attempts:
+            url = cand["base"].rstrip("/") + path
+            url = url.replace("/v1/v1/", "/v1/")
+            try:
+                async with client.stream("POST", url, json=body, headers=headers) as r:
+                    if r.status_code != 200:
+                        continue
+                    sent = False
+                    async for line in r.aiter_lines():
+                        if not line:
                             continue
-                        sent = False
-                        async for line in r.aiter_lines():
-                            if not line:
-                                continue
-                            if line.startswith("data:"):
-                                line = line[5:].strip()
-                            if line == "[DONE]":
-                                if sent:
-                                    return
-                                break
-                            try:
-                                obj = json.loads(line)
-                            except Exception:
-                                continue
-                            choice = (obj.get("choices") or [{}])[0]
-                            delta = ((choice.get("delta") or {}).get("content")) or ((choice.get("message") or {}).get("content"))
-                            if isinstance(delta, str) and delta:
-                                sent = True
-                                yield delta
-                        if sent:
-                            return
-                except Exception:
-                    continue
+                        raw = line[5:].strip() if line.startswith("data:") else line
+                        if raw == "[DONE]":
+                            if sent: return
+                            break
+                        try:
+                            obj = json.loads(raw)
+                        except Exception:
+                            continue
+                        delta = (((obj.get("choices") or [{}])[0]).get("delta") or {}).get("content") or ((obj.get("message") or {}).get("content"))
+                        if isinstance(delta, str) and delta:
+                            sent = True
+                            yield delta
+                    if sent:
+                        return
+            except Exception:
+                continue
         return
 
-    def has_provider_config(self) -> bool:
-        return bool(settings.resolved_ai_base_url() or settings.resolved_ai_api_key() or settings.OLLAMA_BASE_URL)
+    async def chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.4, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> str:
+        det = deterministic_response(messages, mode)
+        if det is not None:
+            return det
+        norm = self._normalize_messages(messages, mode=mode, system=system)
+        use_model = (model or self.default_chat_model or "llama3.1").strip()
+        if use_model == "auto":
+            use_model = self.default_chat_model or "llama3.1"
+        payload = {"model": use_model, "messages": norm, "temperature": max(0.0, min(float(temperature or 0.4), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=8.0)) as client:
+            for cand in self._candidates():
+                text = await self._try_generate(client, cand, payload)
+                if text:
+                    return text
+        return capability_notice() + "\n\n**Your message:** " + last_user_text(messages)[:1500]
 
-    def status(self) -> Dict[str, Any]:
-        base = settings.resolved_ai_base_url() or ""
-        return {
-            "ready": self.has_provider_config(),
-            "model": self.default_chat_model,
-            "provider_hint": "openai-compatible" if base else "ollama/local",
-            "base_configured": bool(base),
-            "key_configured": bool(settings.resolved_ai_api_key()),
-        }
-
-    def _setup_message(self, mode: str) -> str:
-        return (
-            "## AI setup required for live, accurate answers\n"
-            "AETHRIX’s chat UI is deployed, but it needs a live language-model provider to answer questions correctly and logically across topics.\n\n"
-            "**Set these Vercel/host environment variables (recommended: OpenAI-compatible):**\n"
-            "- `AI_BASE_URL` — provider API base URL (OpenAI-compatible)\n"
-            "- `AI_API_KEY` — provider API key\n"
-            "- `AI_MODEL` — model name (choose a capable model for best accuracy)\n\n"
-            "**Also supported:** `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`, `AI_MODEL`), or OpenRouter/Groq/Together equivalents via `AI_BASE_URL`/`AI_API_KEY`. For self-hosting, use `OLLAMA_BASE_URL` and `DEFAULT_CHAT_MODEL`.\n\n"
-            f"Current mode: **{mode}**. After setting variables, redeploy/restart the backend and send your question again."
-        )
-
-    async def chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> str:
-        model = (model or self.default_chat_model or "gpt-4o-mini").strip()
-        if model == "auto":
-            model = self.default_chat_model or "gpt-4o-mini"
-        payload_messages = self._normalize_messages(messages, mode=mode, system=system)
-        payload = {"model": model, "messages": payload_messages, "temperature": max(0.0, min(float(temperature or 0.7), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
-        timeout = httpx.Timeout(180.0, connect=15.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for cand in self._provider_candidates():
-                content = await self._openai_chat(client, cand["base"], cand.get("key", ""), payload)
-                if content:
-                    return content
-        return self._setup_message(mode)
-
-    async def stream_chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> AsyncGenerator[str, None]:
-        model = (model or self.default_chat_model or "gpt-4o-mini").strip()
-        if model == "auto":
-            model = self.default_chat_model or "gpt-4o-mini"
-        payload_messages = self._normalize_messages(messages, mode=mode, system=system)
-        payload = {"model": model, "messages": payload_messages, "temperature": max(0.0, min(float(temperature or 0.7), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
-        timeout = httpx.Timeout(None, connect=15.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for cand in self._provider_candidates():
+    async def stream_chat_completion(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.4, max_tokens: int = 4096, mode: str = "assistant", system: Optional[str] = None) -> AsyncGenerator[str, None]:
+        det = deterministic_response(messages, mode)
+        if det is not None:
+            for c in re.findall(r".{1,80}(?:\s+|$)", det, re.S):
+                yield c
+            return
+        norm = self._normalize_messages(messages, mode=mode, system=system)
+        use_model = (model or self.default_chat_model or "llama3.1").strip()
+        if use_model == "auto":
+            use_model = self.default_chat_model or "llama3.1"
+        payload = {"model": use_model, "messages": norm, "temperature": max(0.0, min(float(temperature or 0.4), 2.0)), "max_tokens": max(256, min(int(max_tokens or 4096), 8192))}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8.0)) as client:
+            for cand in self._candidates():
                 sent = False
-                async for chunk in self._openai_stream(client, cand["base"], cand.get("key", ""), payload):
+                async for chunk in self._stream_generate(client, cand, payload):
                     sent = True
                     yield chunk
                 if sent:
                     return
-        for chunk in re.findall(r".{1,120}(?:\s+|$)", self._setup_message(mode), re.S):
-            yield chunk
-
-    async def generate_image(self, prompt: str, model: Optional[str] = None, width: int = 1024, height: int = 1024) -> Dict[str, Any]:
-        return {
-            "status": "ready",
-            "prompt": prompt,
-            "model": model or settings.DEFAULT_IMAGE_MODEL,
-            "width": width,
-            "height": height,
-            "image_url": f"https://image.pollinations.ai/prompt/{httpx.QueryParams({'prompt': prompt, 'width': width, 'height': height})['prompt']}" if prompt else None,
-        }
+        msg = capability_notice() + "\n\n**Your message:** " + last_user_text(messages)[:1500]
+        for c in re.findall(r".{1,80}(?:\s+|$)", msg, re.S):
+            yield c
 
     async def generate_email(self, purpose: str, recipient: str, tone: str = "professional", details: str = "") -> str:
-        messages = [{"role": "user", "content": f"Write an email.\nRecipient: {recipient}\nPurpose: {purpose}\nTone: {tone}\nDetails: {details}\nInclude a clear subject line and polished body."}]
-        return await self.chat_completion(messages, mode="writer")
+        return await self.chat_completion([{"role": "user", "content": f"Write an email. Recipient: {recipient}. Purpose: {purpose}. Tone: {tone}. Details: {details}. Include subject and body."}], mode="writer")
 
     async def create_document(self, doc_type: str, topic: str, requirements: str = "") -> str:
-        messages = [{"role": "user", "content": f"Create a high-quality {doc_type}.\nTopic: {topic}\nRequirements: {requirements}\nUse clear headings, structured sections, and practical detail."}]
-        return await self.chat_completion(messages, mode="writer")
+        return await self.chat_completion([{"role": "user", "content": f"Create a high-quality {doc_type} about: {topic}. Requirements: {requirements}."}], mode="writer")
 
     async def research(self, query: str, depth: str = "standard") -> Dict[str, Any]:
-        messages = [{"role": "user", "content": f"Research request ({depth}).\nTopic: {query}\nProvide an elaborate, well-structured response with background, key findings, implications, limitations/uncertainty, and recommended next steps."}]
-        content = await self.chat_completion(messages, mode="research")
-        return {"query": query, "content": content, "sources": [], "depth": depth}
+        content = await self.chat_completion([{"role": "user", "content": f"Research ({depth}): {query}. Provide background, key points, logical analysis, uncertainty, and next steps. Be accurate; do not invent facts."}], mode="research")
+        return {"query": query, "content": content, "sources": [], "depth": depth, "engine": "aethrix"}
+
+    async def generate_image(self, prompt: str, model: Optional[str] = None, width: int = 1024, height: int = 1024) -> Dict[str, Any]:
+        # No external AI API dependency. Connect your own self-hosted image backend if desired.
+        return {"status": "not_configured", "prompt": prompt, "model": model or "self-hosted", "width": width, "height": height, "message": "Image generation requires your own self-hosted image model/backend. The AETHRIX API is ready to integrate it."}
 
 
 ai_service = AethrixAIService()

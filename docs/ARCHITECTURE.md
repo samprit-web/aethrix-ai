@@ -1,55 +1,32 @@
-# AETHRIX AI Architecture
+# AETHRIX AI Architecture (Owned)
 
-## Overview
-AETHRIX AI is built with a completely original, modular architecture designed for independence and scalability. No dependencies on commercial AI assistant APIs.
+## Principle
+AETHRIX is built to be **owned by you**: your UI, your API, your data model, your orchestration, and your deployment. The code in this repository does **not** require commercial AI assistant APIs.
 
-## System Architecture
+## Components
+- **Frontend (Next.js)**: ChatGPT/Gemini-style UI, streaming chat, tools pages. Uses your backend API (`/api/v1`).
+- **Backend API (FastAPI)**: Auth, conversations, chat streaming, tools, and the AETHRIX engine endpoints. This is your own API surface.
+- **AETHRIX Engine (`backend/app/services/engine.py`)**: Deterministic, owned capabilities (verified math, intent routing, structured responses). Safe expression evaluation runs locally.
+- **Model Orchestration (`backend/app/services/ai_service.py`)**: Routes chat to a **self-hosted open-weights model** that you run (Ollama/llama.cpp/vLLM/TGI/OpenAI-compatible gateway on your infrastructure) and falls back to the deterministic engine when no model is available.
 
-### Frontend (Next.js 15)
-- **Framework**: Next.js with App Router
-- **Styling**: Tailwind CSS with custom futuristic theme
-- **UI Components**: Custom components with cyberpunk/aethrix aesthetic
-- **State Management**: React hooks and context
-- **Authentication**: JWT token-based auth
+## “No dependency / answers everything” reality
+To answer arbitrary questions **correctly and logically across all domains** at the level of large assistants, you need a capable language model. AETHRIX is designed so that model can be:
+- **open-weights** and **self-hosted** on hardware you control,
+- accessed only through **your own** endpoint (`AI_BASE_URL` / `OLLAMA_BASE_URL`),
+- without sending traffic to commercial AI assistant APIs.
 
-### Backend (FastAPI)
-- **Framework**: FastAPI for high-performance async API
-- **Architecture**: RESTful API with versioning (/api/v1)
-- **Authentication**: OAuth2 with JWT tokens
-- **Validation**: Pydantic schemas
-- **Database ORM**: SQLAlchemy
+AETHRIX will **not fabricate** open-domain answers when no capable model is connected; it will use deterministic results where verifiable (e.g., math) and provide explicit self-hosting setup guidance.
 
-### Database Layer
-- **Primary DB**: PostgreSQL for relational data
-- **Models**: Users, Conversations, Messages, Images, Documents, Email Drafts
-- **Migrations**: Alembic for schema management
+## Self-hosted setup (owned inference)
+1. Run an inference server you control (recommended: Ollama).
+2. Pull an open-weights model you choose/have rights to run (example): `ollama pull llama3.1`.
+3. Configure backend env vars:
+   - `OLLAMA_BASE_URL=http://<your-host>:11434`
+   - `DEFAULT_CHAT_MODEL=<model>`
+   - or `AI_BASE_URL=http://<your-gateway>/v1` + `AI_MODEL=<model>` (+ `AI_API_KEY` only if your own gateway requires it)
+4. Deploy the backend where it can reach that host. Vercel serverless can host the API layer, but **large models should run on your own compute** (VPS/GPU server/Docker host) and be exposed securely to the backend.
 
-### AI Orchestration Layer
-- **Service**: Custom AethrixAIService
-- **Model Backend**: Ollama (primary), supports any OpenAI-compatible API
-- **Models**: LLaMA, Mistral, Gemma, Stable Diffusion (all open-source)
-- **No Third-Party APIs**: Completely self-hosted capable
-
-### Storage
-- **File Uploads**: Local filesystem or S3-compatible (Cloudflare R2, MinIO)
-- **Images**: Generated images stored with metadata
-
-## Security
-- **Authentication**: Secure password hashing with bcrypt
-- **Tokens**: JWT with configurable expiration
-- **CORS**: Configured for specific origins
-- **Rate Limiting**: Built-in rate limiting
-- **Input Validation**: All inputs validated with Pydantic
-
-## Deployment Options
-1. **Single Server**: Docker Compose with all services
-2. **Distributed**: Separate frontend, backend, database, AI models
-3. **Self-Hosted**: Run entirely on own infrastructure
-4. **Cloud**: Deploy to any cloud provider
-
-## Independence Principles
-- **No External AI Dependencies**: All inference through self-hosted/open models
-- **Original Codebase**: Built from scratch, no forks of commercial products
-- **Open Source Models**: Only use models with open licenses
-- **Self-Sufficient**: Can operate without internet to third-party AI services
-- **Data Sovereignty**: All data stays under platform control
+## Verification
+- `GET /api/v1/chat/status` — engine/model config status.
+- `GET /api/v1/engine/status` — owned engine status.
+- `POST /api/v1/engine/calc` — deterministic verified calculation.
