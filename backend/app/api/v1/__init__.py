@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1 import auth, chat, image, email, document, research, meeting, user, aethrix
+from app.api.v1 import auth, chat, image, email, document, research, meeting, user, aethrix, engine
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -11,3 +11,4 @@ api_router.include_router(document.router, prefix="/document", tags=["document"]
 api_router.include_router(meeting.router, prefix="/meeting", tags=["meeting"])
 api_router.include_router(research.router, prefix="/research", tags=["research"])
 api_router.include_router(aethrix.router, prefix="/aethrix", tags=["aethrix"])
+api_router.include_router(engine.router, prefix="/engine", tags=["engine"])
